@@ -10,11 +10,26 @@
 --
 module GameCollisions where
 
+import Data.Hashable
+import qualified Data.HashMap.Strict                   as HM
+import Data.IdentityList
 import Data.List
 import Data.Maybe
+import Debug.Trace
+import Constants
 import Objects
-import Data.IdentityList
+import Physics.TwoDimensions.Physics
 import Physics.TwoDimensions.Dimensions
+
+showPartitionMap :: (Hashable a, Show a) => HM.HashMap a [(ILKey, Object)] -> String
+showPartitionMap hm = header ++ list
+ where header = "*******************************"
+       list   = foldr (\(q, os) s -> s ++ "\n" ++ show q ++ ":    " ++ objectNames os) "" (HM.toList hm)
+
+       objectNames :: [(a, Object)] -> String
+       objectNames os = concat $ intersperse "," oss
+          where oss :: [String]
+                oss = map (show . objectName . snd) os
 
 -- | Given a list of objects, it detects all the collisions between them.
 --
@@ -24,16 +39,51 @@ import Physics.TwoDimensions.Dimensions
 --
 detectCollisions :: IL Object -> Collisions
 detectCollisions = detectCollisionsH
- where detectCollisionsH objsT = flattened
+ where detectCollisionsH objsT = -- trace (showPartitionMap segmented)
+                                 flattened
          where -- Eliminate empty collision sets
                -- TODO: why is this really necessary?
                flattened = filter (\(Collision n) -> not (null n)) collisions
 
                -- Detect collisions between moving objects and any other objects
-               collisions = detectCollisions' objsT moving
+               -- collisions = detectCollisions' objsT moving
+
+               segmented = partitionObjects objsT
+               collisions = concatMap (\(o,(v,os)) -> concatMap (detectCollisions''' (o,v)) os) $ HM.toList (groupHashMap segmented)
 
                -- Partition the object space between moving and static objects
                (moving, _static) = partition (canCauseCollisions.snd) $ assocsIL objsT
+
+groupHashMap :: Hashable a => HM.HashMap a [(ILKey, b)] -> HM.HashMap ILKey (b, [(ILKey, b)])
+groupHashMap m = foldr f HM.empty (HM.elems m)
+
+   where groupPairs :: [(ILKey, b)] -> [(ILKey, (b, [(ILKey, b)]))]
+         groupPairs bs = [(k, (v, deleteBy (\(k1,_) (k2,_) -> k1 == k2) (k,v) bs)) | b@(k,v) <- bs]
+
+         f :: [(ILKey, b)] -> HM.HashMap ILKey (b, [(ILKey, b)]) -> HM.HashMap ILKey (b, [(ILKey, b)])
+         f bs hm = foldr (\(k, vs) hm' -> HM.insertWith (\(_,v1) (v,v2) -> (v, v1 ++ v2)) k vs hm') hm (groupPairs bs)
+
+type Quadrant = (Int, Int)
+
+partitionObjects :: IL Object -> HM.HashMap Quadrant [(ILKey,Object)]
+partitionObjects objs = hm
+    where hm = foldr (\(n,o) hmr -> insertObjectIntoQuadrants n o hmr) HM.empty (assocsIL objs)
+
+          insertObjectIntoQuadrants on o hmr = foldr (insertObjectIntoQuadrant (on, o)) hmr (quadrants o)
+
+          insertObjectIntoQuadrant on q hmr =
+            HM.insertWith (\[on] os2 -> on : os2) q [on] hmr
+
+          quadrants :: Object -> [Quadrant]
+          quadrants o = [(x,y) | x <- xQuads, y <- yQuads]
+            where (Rectangle (x,y) (w,h)) = objShape o
+                  xQuads = [floor (minX / quadSide) .. ceiling (maxX / quadSide)]
+                  yQuads = [floor (minY / quadSide) .. ceiling (maxY / quadSide)]
+                  quadSide = 60
+                  minX = x
+                  maxX = x + w
+                  minY = y
+                  maxY = y + h
 
 -- | Detect collisions between each moving object and
 -- every other object.
@@ -65,13 +115,13 @@ detectCollisions''' m o
 --   --
 --   -- Integral only for dt interval
 --   actualVel <- iterFrom (\_ (v1,v2) dt _ -> (v1 * dt, v2 * dt)) (0,0) -< objectVel o
--- 
+--
 --   -- Update position
 --   let newPos = objectPos o ^+^ actualVel
 --       o'     = o { objectPos = newPos }
 --   returnA -< (i,o')
 
--- killBall :: ObjectOutput -> ObjectOutput 
+-- killBall :: ObjectOutput -> ObjectOutput
 -- killBall oo = oo { outputObject = o' }
 --  where o  = outputObject oo
 --        o' = o { objectDead = True}
@@ -103,7 +153,7 @@ detectCollisions''' m o
 --   one collieded with to facilitate impl. of "inCollisionWith".
 --
 changedVelocity :: ObjectName -> Collisions -> Maybe Vel2D
-changedVelocity name cs = 
+changedVelocity name cs =
     case concatMap (filter ((== name) . fst) . collisionData) cs of
         []          -> Nothing
         (_, v') : _ -> Just v'
